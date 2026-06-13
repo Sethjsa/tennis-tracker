@@ -103,10 +103,11 @@ create table if not exists public.saved_matches (
 
 create index if not exists saved_matches_user_idx on public.saved_matches (user_id);
 
--- Prevent logging the exact same match twice.
+-- Prevent logging the exact same match twice. A plain (non-partial) unique index so
+-- it can back the ON CONFLICT (user_id, source_match_id) upsert. NULL source_match_id
+-- (manual entries) are treated as distinct, so those never collide.
 create unique index if not exists saved_matches_user_source_uniq
-  on public.saved_matches (user_id, source_match_id)
-  where source_match_id is not null;
+  on public.saved_matches (user_id, source_match_id);
 
 alter table public.saved_matches enable row level security;
 
