@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createSupabaseBrowser } from "@/lib/supabaseBrowser";
-import { roundLabel, roundRank, sideLabel, deriveFacts } from "@/lib/score";
+import { roundLabel, roundRank, sideLabel, deriveFacts, effectiveDate, formatDay } from "@/lib/score";
 import type { TourMatch, TournamentInstance } from "@/lib/types";
 
 const SURFACES = ["Hard", "Clay", "Grass", "Carpet"];
@@ -32,7 +32,7 @@ export default function Diary({ onSaved }: { onSaved?: () => void }) {
   const [matches, setMatches] = useState<TourMatch[]>([]);
   const [loadingMatches, setLoadingMatches] = useState(false);
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
-  const [selectedRounds, setSelectedRounds] = useState<Set<string>>(new Set());
+  const [selectedDays, setSelectedDays] = useState<Set<string>>(new Set());
   const [picks, setPicks] = useState<Map<number, Selection>>(new Map());
   const [savedIds, setSavedIds] = useState<Set<number>>(new Set());
 
@@ -82,37 +82,44 @@ export default function Diary({ onSaved }: { onSaved?: () => void }) {
           (a.match_num ?? 0) - (b.match_num ?? 0),
       );
       setMatches(list);
-      setSelectedRounds(new Set(list.map((m) => m.round ?? "?")));
+      setSelectedDays(new Set(list.map((m) => effectiveDate(m) ?? "?")));
       setSavedIds(new Set((saved ?? []).map((s: any) => s.source_match_id).filter(Boolean)));
       setLoadingMatches(false);
     },
     [supabase],
   );
 
-  const rounds = useMemo(() => {
-    const set = new Set<string>();
+  // Distinct days (with whether every match that day has an exact date).
+  const days = useMemo(() => {
+    const map = new Map<string, boolean>(); // day -> allExact
     matches.forEach((m) => {
       if (typeFilter === "singles" && m.is_doubles) return;
       if (typeFilter === "doubles" && !m.is_doubles) return;
-      set.add(m.round ?? "?");
+      const d = effectiveDate(m) ?? "?";
+      map.set(d, (map.get(d) ?? true) && m.date_exact);
     });
-    return [...set].sort((a, b) => roundRank(a) - roundRank(b));
+    return [...map.entries()].map(([day, exact]) => ({ day, exact })).sort((a, b) => a.day.localeCompare(b.day));
   }, [matches, typeFilter]);
 
   const visibleMatches = useMemo(
     () =>
-      matches.filter((m) => {
-        if (typeFilter === "singles" && m.is_doubles) return false;
-        if (typeFilter === "doubles" && !m.is_doubles) return false;
-        return selectedRounds.has(m.round ?? "?");
-      }),
-    [matches, selectedRounds, typeFilter],
+      matches
+        .filter((m) => {
+          if (typeFilter === "singles" && m.is_doubles) return false;
+          if (typeFilter === "doubles" && !m.is_doubles) return false;
+          return selectedDays.has(effectiveDate(m) ?? "?");
+        })
+        .sort((a, b) =>
+          (effectiveDate(a) ?? "").localeCompare(effectiveDate(b) ?? "") ||
+          roundRank(a.round) - roundRank(b.round),
+        ),
+    [matches, selectedDays, typeFilter],
   );
 
-  function toggleRound(r: string) {
-    setSelectedRounds((prev) => {
+  function toggleDay(d: string) {
+    setSelectedDays((prev) => {
       const next = new Set(prev);
-      next.has(r) ? next.delete(r) : next.add(r);
+      next.has(d) ? next.delete(d) : next.add(d);
       return next;
     });
   }
@@ -226,7 +233,8 @@ export default function Diary({ onSaved }: { onSaved?: () => void }) {
               {active.tourney_name} <span className="text-neutral-400">{active.year}</span>
             </h2>
             <p className="text-sm text-neutral-500">
-              Pick the rounds you attended, then check the matches you watched.
+              Pick the day(s) you attended, then check the matches you watched.
+              <span className="text-neutral-400"> Dates marked “~” are estimated.</span>
             </p>
           </div>
 
@@ -246,14 +254,14 @@ export default function Diary({ onSaved }: { onSaved?: () => void }) {
               )}
 
               <div className="flex flex-wrap gap-2">
-                {rounds.map((r) => (
-                  <button key={r} onClick={() => toggleRound(r)}
+                {days.map(({ day, exact }) => (
+                  <button key={day} onClick={() => toggleDay(day)}
                     className={`rounded-full border px-3 py-1 text-sm ${
-                      selectedRounds.has(r)
+                      selectedDays.has(day)
                         ? "border-green-500 bg-green-50 text-green-700 dark:bg-green-950 dark:text-green-300"
                         : "border-neutral-300 dark:border-neutral-700 text-neutral-500"
                     }`}>
-                    {roundLabel(r)}
+                    {exact ? "" : "~"}{formatDay(day === "?" ? null : day)}
                   </button>
                 ))}
               </div>
@@ -276,7 +284,11 @@ export default function Diary({ onSaved }: { onSaved?: () => void }) {
                           <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-neutral-400">
                             {roundLabel(m.round)}
                             {m.is_doubles && <span className="rounded bg-purple-100 px-1 text-purple-700 dark:bg-purple-950 dark:text-purple-300">doubles</span>}
-                            {m.est_date && <span className="normal-case text-neutral-400">· ~{m.est_date}</span>}
+                            {effectiveDate(m) && (
+                              <span className="normal-case text-neutral-400">
+                                · {m.date_exact ? "" : "~"}{formatDay(effectiveDate(m))}
+                              </span>
+                            )}
                           </div>
                           <div className="font-medium">
                             {sideLabel(m, "w")} <span className="text-neutral-400">def.</span> {sideLabel(m, "l")}

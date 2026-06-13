@@ -15,6 +15,8 @@ export interface TourMatch {
   tourney_level: string | null;
   tourney_date: string | null;
   est_date: string | null;
+  match_date: string | null;
+  date_exact: boolean;
   match_num: number | null;
   round: string | null;
   best_of: number | null;

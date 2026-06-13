@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createSupabaseBrowser } from "@/lib/supabaseBrowser";
 import { computeStats, type Count } from "@/lib/stats";
-import { roundLabel, sideLabel } from "@/lib/score";
+import { roundLabel, sideLabel, effectiveDate, formatDay } from "@/lib/score";
 import type { SavedMatch } from "@/lib/types";
 
 export default function Dashboard({ refreshKey = 0 }: { refreshKey?: number }) {
@@ -43,6 +43,7 @@ export default function Dashboard({ refreshKey = 0 }: { refreshKey?: number }) {
       {/* headline numbers */}
       <section className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Stat label="Matches" value={stats.totalMatches} sub={`${stats.singles} singles · ${stats.doubles} doubles`} />
+        <Stat label="Days attended" value={stats.distinctDays} />
         <Stat label="Hours watched" value={stats.totalHours} sub={stats.avgMinutes ? `avg ${stats.avgMinutes} min` : undefined} />
         <Stat label="Sets" value={stats.totalSets} sub={`${stats.totalGames} games`} />
         <Stat label="Tiebreaks" value={stats.totalTiebreaks} />
@@ -108,7 +109,9 @@ export default function Dashboard({ refreshKey = 0 }: { refreshKey?: number }) {
                   {sideLabel(sm.match, "w")} <span className="text-neutral-400">def.</span> {sideLabel(sm.match, "l")}
                 </div>
                 <div className="truncate text-xs text-neutral-500">
-                  {sm.tournament} {sm.year} · {roundLabel(sm.round)} · {sm.match.score}
+                  {sm.tournament} {sm.year} · {roundLabel(sm.round)}
+                  {effectiveDate(sm.match) ? ` · ${sm.match.date_exact ? "" : "~"}${formatDay(effectiveDate(sm.match))}` : ""}
+                  {" · "}{sm.match.score}
                   {sm.match.is_doubles ? " · doubles" : ""}
                   {sm.rating ? ` · ${"★".repeat(sm.rating)}` : ""}
                 </div>

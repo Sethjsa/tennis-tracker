@@ -1,5 +1,5 @@
 import type { SavedMatch, TourMatch } from "./types";
-import { allPlayers, deriveFacts } from "./score";
+import { allPlayers, deriveFacts, effectiveDate } from "./score";
 
 export interface Count { name: string; count: number }
 
@@ -38,6 +38,7 @@ export interface DiaryStats {
   distinctTournaments: number;
   distinctCountries: number;
   distinctPlayers: number;
+  distinctDays: number;
 
   topPlayers: Count[];
   bySurface: Count[];
@@ -86,6 +87,7 @@ export function computeStats(matches: SavedMatch[]): DiaryStats {
   let singles = 0, doubles = 0;
 
   const players: string[] = [], iocs: string[] = [];
+  const days = new Set<string>();
   let longestMatch: SavedMatch | null = null;
   let biggestUpset: SavedMatch | null = null, biggestUpsetGap = -1;
   let bestRank: { name: string; rank: number } | null = null;
@@ -126,6 +128,8 @@ export function computeStats(matches: SavedMatch[]): DiaryStats {
 
     players.push(...allPlayers(m));
     iocs.push(...iocsOf(m));
+    const d = effectiveDate(m);
+    if (d) days.add(d);
   }
 
   const byTournament = tally(matches.map((m) => (m.year ? `${m.tournament} ${m.year}` : m.tournament)));
@@ -148,6 +152,7 @@ export function computeStats(matches: SavedMatch[]): DiaryStats {
     distinctTournaments: byTournament.length,
     distinctCountries: new Set(iocs).size,
     distinctPlayers: topPlayers.length,
+    distinctDays: days.size,
     topPlayers: topPlayers.slice(0, 8),
     bySurface,
     byRound,

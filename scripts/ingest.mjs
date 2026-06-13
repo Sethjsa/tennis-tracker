@@ -10,6 +10,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
+import * as XLSX from "xlsx";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -90,6 +91,64 @@ function estDate(iso, round, level) {
   return d.toISOString().slice(0, 10);
 }
 
+// --- exact per-match dates from tennis-data.co.uk (singles only) ------------
+// Names differ between sources ("Alex De Minaur" vs "De Minaur A."), so we key
+// on first-initial + surname and try two surname variants (full join + last word)
+// to bridge inconsistent tokenisation of compound surnames.
+const normAlpha = (s) => (s || "").toLowerCase().replace(/[^a-z]/g, "");
+function nameKeyVariants(initialChar, surnameTokens) {
+  if (!surnameTokens.length) return [];
+  const full = normAlpha(surnameTokens.join(""));
+  const last = normAlpha(surnameTokens[surnameTokens.length - 1].split("-").pop());
+  return [...new Set([initialChar + "|" + full, initialChar + "|" + last])].filter((k) => k.length > 2);
+}
+const sackNameKeys = (name) => {
+  const t = (name || "").trim().split(/\s+/);
+  if (t.length < 2) return [];
+  return nameKeyVariants(normAlpha(t[0])[0] || "", t.slice(1));
+};
+const tdNameKeys = (name) => {
+  const t = (name || "").trim().split(/\s+/);
+  if (t.length < 2) return [];
+  return nameKeyVariants(normAlpha(t[t.length - 1])[0] || "", t.slice(0, -1));
+};
+const TD = {
+  atp: (y) => [`http://www.tennis-data.co.uk/${y}/${y}.xlsx`, `http://www.tennis-data.co.uk/${y}/${y}.xls`],
+  wta: (y) => [`http://www.tennis-data.co.uk/${y}w/${y}.xlsx`, `http://www.tennis-data.co.uk/${y}w/${y}.xls`],
+};
+async function fetchDateMap(tour, year) {
+  const map = new Map();
+  let buf = null;
+  for (const url of TD[tour](year)) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) { buf = Buffer.from(await res.arrayBuffer()); break; }
+    } catch { /* try next */ }
+  }
+  if (!buf) return map;
+  let rows;
+  try {
+    const wb = XLSX.read(buf, { type: "buffer", cellDates: true });
+    rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: null });
+  } catch { return map; }
+  for (const r of rows) {
+    if (!r.Date || !r.Winner || !r.Loser) continue;
+    const d = new Date(new Date(r.Date).getTime() + 12 * 3600 * 1000).toISOString().slice(0, 10);
+    for (const wk of tdNameKeys(r.Winner))
+      for (const lk of tdNameKeys(r.Loser))
+        if (!map.has(wk + "#" + lk)) map.set(wk + "#" + lk, d);
+  }
+  return map;
+}
+function lookupDate(map, winnerName, loserName) {
+  for (const wk of sackNameKeys(winnerName))
+    for (const lk of sackNameKeys(loserName)) {
+      const d = map.get(wk + "#" + lk);
+      if (d) return d;
+    }
+  return null;
+}
+
 // Serve-stat columns are identical across singles/doubles; CSV uses mixed case.
 const SERVE = [
   ["w_ace", "w_ace"], ["w_df", "w_df"], ["w_svpt", "w_svpt"], ["w_1stIn", "w_1stin"],
@@ -100,10 +159,13 @@ const SERVE = [
   ["l_bpSaved", "l_bpsaved"], ["l_bpFaced", "l_bpfaced"],
 ];
 
-function mapRow(get, tour, year, isDoubles) {
+function mapRow(get, tour, year, isDoubles, dateMap) {
   const level = get("tourney_level");
   const tdate = toDate(get("tourney_date"));
   const round = get("round") || null;
+  const wName = isDoubles ? get("winner1_name") : get("winner_name");
+  const lName = isDoubles ? get("loser1_name") : get("loser_name");
+  const exact = isDoubles || !dateMap ? null : lookupDate(dateMap, wName, lName);
   const base = {
     tour, year, is_doubles: isDoubles,
     tourney_id: get("tourney_id") || null,
@@ -113,6 +175,8 @@ function mapRow(get, tour, year, isDoubles) {
     tourney_level: level || null,
     tourney_date: tdate,
     est_date: estDate(tdate, round, level),
+    match_date: exact,
+    date_exact: !!exact,
     match_num: toInt(get("match_num")),
     round,
     best_of: toInt(get("best_of")),
@@ -178,7 +242,11 @@ async function ingestFile(tour, year, isDoubles) {
   const header = rows[0];
   const idx = Object.fromEntries(header.map((h, i) => [h, i]));
 
+  // Exact dates from tennis-data.co.uk (singles only).
+  const dateMap = isDoubles ? null : await fetchDateMap(tour, year);
+
   const records = [];
+  let exactN = 0;
   for (let r = 1; r < rows.length; r++) {
     const row = rows[r];
     if (!row.length) continue;
@@ -186,7 +254,9 @@ async function ingestFile(tour, year, isDoubles) {
     const w1 = isDoubles ? get("winner1_name") : get("winner_name");
     const l1 = isDoubles ? get("loser1_name") : get("loser_name");
     if (!w1 || !l1) continue;
-    records.push(mapRow(get, tour, year, isDoubles));
+    const rec = mapRow(get, tour, year, isDoubles, dateMap);
+    if (rec.date_exact) exactN++;
+    records.push(rec);
   }
 
   // De-dupe within file on the conflict key so no upsert batch hits a key twice.
@@ -204,7 +274,8 @@ async function ingestFile(tour, year, isDoubles) {
     if (error) { console.log(`\n    ! ${error.message}`); break; }
     written += chunk.length;
   }
-  console.log(`${written} matches`);
+  const datePct = records.length ? Math.round((100 * exactN) / records.length) : 0;
+  console.log(`${written} matches${isDoubles ? "" : ` (${datePct}% exact dates)`}`);
   return written;
 }
 

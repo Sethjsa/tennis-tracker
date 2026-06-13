@@ -21,6 +21,8 @@ create table public.tour_matches (
   tourney_level text,                           -- G(rand slam) M(asters) A(tp500/250) F(inals) D(avis) etc.
   tourney_date  date,
   est_date      date,                           -- estimated per-match date (round-derived)
+  match_date    date,                           -- exact date (tennis-data.co.uk; singles only)
+  date_exact    boolean not null default false,
   match_num     int,
   round         text,
   best_of       int,
@@ -59,6 +61,8 @@ create policy "tour_matches readable by all"
 -- No write policy => only the service-role key (ingest) can write.
 
 -- Search distinct tournament instances (tournament + year) by name.
+-- Dropped first because the return signature changed across schema versions.
+drop function if exists public.search_tournaments(text, int);
 create or replace function public.search_tournaments(q text, yr int default null)
 returns table (
   tour text, tourney_name text, year int, surface text,

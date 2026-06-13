@@ -76,6 +76,16 @@ export function deriveFacts(m: TourMatch): MatchFacts {
   };
 }
 
+// Best available date for a match: exact (tennis-data) > estimated > tournament start.
+export function effectiveDate(m: TourMatch): string | null {
+  return m.match_date ?? m.est_date ?? m.tourney_date ?? null;
+}
+export function formatDay(iso: string | null): string {
+  if (!iso) return "Undated";
+  const d = new Date(iso + "T12:00:00Z");
+  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
+
 // Players on each side (1 or 2 per side), for individual player counting.
 export function winnerPlayers(m: TourMatch): string[] {
   return [m.winner1_name, m.winner2_name].filter(Boolean) as string[];
