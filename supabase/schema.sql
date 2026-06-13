@@ -19,6 +19,8 @@ create table public.tour_matches (
   surface       text,
   draw_size     int,
   tourney_level text,                           -- G(rand slam) M(asters) A(tp500/250) F(inals) D(avis) etc.
+  series        text,                           -- ATP250/ATP500/Masters 1000/Grand Slam... (tennis-data)
+  court         text,                           -- Indoor / Outdoor (tennis-data)
   tourney_date  date,
   est_date      date,                           -- estimated per-match date (round-derived)
   match_date    date,                           -- exact date (tennis-data.co.uk; singles only)

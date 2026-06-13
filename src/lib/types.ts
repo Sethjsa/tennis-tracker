@@ -13,6 +13,8 @@ export interface TourMatch {
   surface: string | null;
   draw_size: number | null;
   tourney_level: string | null;
+  series: string | null;
+  court: string | null;
   tourney_date: string | null;
   est_date: string | null;
   match_date: string | null;

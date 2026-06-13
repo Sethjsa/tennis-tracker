@@ -134,17 +134,18 @@ async function fetchDateMap(tour, year) {
   for (const r of rows) {
     if (!r.Date || !r.Winner || !r.Loser) continue;
     const d = new Date(new Date(r.Date).getTime() + 12 * 3600 * 1000).toISOString().slice(0, 10);
+    const info = { date: d, series: r.Series || r.Tier || null, court: r.Court || null };
     for (const wk of tdNameKeys(r.Winner))
       for (const lk of tdNameKeys(r.Loser))
-        if (!map.has(wk + "#" + lk)) map.set(wk + "#" + lk, d);
+        if (!map.has(wk + "#" + lk)) map.set(wk + "#" + lk, info);
   }
   return map;
 }
-function lookupDate(map, winnerName, loserName) {
+function lookupTd(map, winnerName, loserName) {
   for (const wk of sackNameKeys(winnerName))
     for (const lk of sackNameKeys(loserName)) {
-      const d = map.get(wk + "#" + lk);
-      if (d) return d;
+      const info = map.get(wk + "#" + lk);
+      if (info) return info;
     }
   return null;
 }
@@ -165,7 +166,7 @@ function mapRow(get, tour, year, isDoubles, dateMap) {
   const round = get("round") || null;
   const wName = isDoubles ? get("winner1_name") : get("winner_name");
   const lName = isDoubles ? get("loser1_name") : get("loser_name");
-  const exact = isDoubles || !dateMap ? null : lookupDate(dateMap, wName, lName);
+  const td = isDoubles || !dateMap ? null : lookupTd(dateMap, wName, lName);
   const base = {
     tour, year, is_doubles: isDoubles,
     tourney_id: get("tourney_id") || null,
@@ -173,10 +174,12 @@ function mapRow(get, tour, year, isDoubles, dateMap) {
     surface: get("surface") || null,
     draw_size: toInt(get("draw_size")),
     tourney_level: level || null,
+    series: td?.series ?? null,
+    court: td?.court ?? null,
     tourney_date: tdate,
     est_date: estDate(tdate, round, level),
-    match_date: exact,
-    date_exact: !!exact,
+    match_date: td?.date ?? null,
+    date_exact: !!td?.date,
     match_num: toInt(get("match_num")),
     round,
     best_of: toInt(get("best_of")),
@@ -257,6 +260,27 @@ async function ingestFile(tour, year, isDoubles) {
     const rec = mapRow(get, tour, year, isDoubles, dateMap);
     if (rec.date_exact) exactN++;
     records.push(rec);
+  }
+
+  // Series/court only matched on ~85% of matches; apply each tournament's most
+  // common value to all its matches so a tournament has one consistent series.
+  if (!isDoubles) {
+    const mode = (id, field) => {
+      const counts = new Map();
+      for (const r of records) if (r.tourney_id === id && r[field]) counts.set(r[field], (counts.get(r[field]) ?? 0) + 1);
+      let best = null, bestN = 0;
+      for (const [v, n] of counts) if (n > bestN) { best = v; bestN = n; }
+      return best;
+    };
+    const seriesById = new Map(), courtById = new Map();
+    for (const r of records) {
+      if (!seriesById.has(r.tourney_id)) seriesById.set(r.tourney_id, mode(r.tourney_id, "series"));
+      if (!courtById.has(r.tourney_id)) courtById.set(r.tourney_id, mode(r.tourney_id, "court"));
+    }
+    for (const r of records) {
+      r.series = seriesById.get(r.tourney_id) ?? r.series;
+      r.court = courtById.get(r.tourney_id) ?? r.court;
+    }
   }
 
   // De-dupe within file on the conflict key so no upsert batch hits a key twice.
