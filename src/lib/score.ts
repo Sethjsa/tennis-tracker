@@ -1,80 +1,103 @@
-// Derive set/game/tiebreak counts from a Sackmann-style score string.
-// Examples: "6-4 5-7 7-6(4)", "6-7(4) 6-5 RET", "7-6(5) 6-3", "6-3 6-2".
-// The winner's games are listed first in each set.
+import type { TourMatch } from "./types";
 
-export interface ScoreBreakdown {
+// Per-match derived facts, computed from the score string + serve/rank columns.
+export interface MatchFacts {
   setsTotal: number;
   gamesTotal: number;
   tiebreaksTotal: number;
+  bagels: number; // 6-0 sets
+  breadsticks: number; // 6-1 sets
   winnerSets: number;
   loserSets: number;
-  straightSets: boolean; // loser won no sets
-  wentDistance: boolean; // match reached a deciding set
+  straightSets: boolean;
+  wentDistance: boolean;
+  walkover: boolean;
+  retired: boolean;
+  breaksTotal: number | null; // service breaks in the match (needs serve stats)
+  acesTotal: number | null;
+  dfTotal: number | null;
+  upset: boolean; // worse-ranked side won
+  rankGap: number | null; // |winner rank points - loser rank points|
 }
 
 const SET_RE = /^(\d{1,2})-(\d{1,2})(\(\d+\))?$/;
+const MATCH_TB_RE = /^[\[(](\d+)-(\d+)[\])]$/; // doubles match tiebreak e.g. (10-6) or [10-8]
 
-export function parseScore(
-  score: string | null | undefined,
-  bestOf: number | null | undefined,
-): ScoreBreakdown {
-  const empty: ScoreBreakdown = {
-    setsTotal: 0,
-    gamesTotal: 0,
-    tiebreaksTotal: 0,
-    winnerSets: 0,
-    loserSets: 0,
-    straightSets: false,
-    wentDistance: false,
-  };
-  if (!score) return empty;
+export function deriveFacts(m: TourMatch): MatchFacts {
+  const score = m.score ?? "";
+  const walkover = /w\/?o|walkover/i.test(score) || score.trim() === "";
+  const retired = /\bret\b|\bdef\b/i.test(score);
 
-  let setsTotal = 0;
-  let gamesTotal = 0;
-  let tiebreaksTotal = 0;
-  let winnerSets = 0;
-  let loserSets = 0;
+  let setsTotal = 0, gamesTotal = 0, tiebreaksTotal = 0, bagels = 0, breadsticks = 0;
+  let winnerSets = 0, loserSets = 0;
 
   for (const token of score.trim().split(/\s+/)) {
-    const m = token.match(SET_RE);
-    if (!m) continue; // skip RET, W/O, DEF, [10-8] match tiebreaks, etc.
-    const a = parseInt(m[1], 10);
-    const b = parseInt(m[2], 10);
-    setsTotal += 1;
-    gamesTotal += a + b;
-    if (m[3]) tiebreaksTotal += 1; // had a "(n)" tiebreak marker
-    if (a > b) winnerSets += 1;
-    else if (b > a) loserSets += 1;
+    const s = token.match(SET_RE);
+    if (s) {
+      const a = +s[1], b = +s[2];
+      setsTotal++; gamesTotal += a + b;
+      if (s[3]) tiebreaksTotal++;
+      const hi = Math.max(a, b), lo = Math.min(a, b);
+      if (hi === 6 && lo === 0) bagels++;
+      if (hi === 6 && lo === 1) breadsticks++;
+      if (a > b) winnerSets++; else if (b > a) loserSets++;
+      continue;
+    }
+    const tb = token.match(MATCH_TB_RE);
+    if (tb) { setsTotal++; tiebreaksTotal++; winnerSets++; } // super-tiebreak: winner takes it
   }
 
-  const decider = bestOf && bestOf > 0 ? Math.ceil(bestOf / 2) + Math.floor(bestOf / 2) : 0;
-  const wentDistance =
-    setsTotal > 0 && (decider ? setsTotal >= decider : winnerSets > 0 && loserSets > 0);
+  const decider = m.best_of ? m.best_of : 0;
+  const wentDistance = setsTotal > 0 && (decider ? setsTotal >= decider : winnerSets > 0 && loserSets > 0);
+
+  // Service breaks = break points faced minus saved, both sides.
+  let breaksTotal: number | null = null;
+  if (m.w_bpfaced != null && m.l_bpfaced != null) {
+    breaksTotal = (m.w_bpfaced - (m.w_bpsaved ?? 0)) + (m.l_bpfaced - (m.l_bpsaved ?? 0));
+  }
+  const acesTotal = m.w_ace != null || m.l_ace != null ? (m.w_ace ?? 0) + (m.l_ace ?? 0) : null;
+  const dfTotal = m.w_df != null || m.l_df != null ? (m.w_df ?? 0) + (m.l_df ?? 0) : null;
+
+  // Upset: winner ranked worse (higher number) than loser.
+  let upset = false;
+  if (m.winner1_rank != null && m.loser1_rank != null) upset = m.winner1_rank > m.loser1_rank;
+  else if (m.winner_seed != null && m.loser_seed != null) upset = m.winner_seed > m.loser_seed;
+
+  const wp = (m.winner1_rank_points ?? 0) + (m.winner2_rank_points ?? 0);
+  const lp = (m.loser1_rank_points ?? 0) + (m.loser2_rank_points ?? 0);
+  const rankGap = m.winner1_rank_points != null && m.loser1_rank_points != null ? Math.abs(wp - lp) : null;
 
   return {
-    setsTotal,
-    gamesTotal,
-    tiebreaksTotal,
-    winnerSets,
-    loserSets,
+    setsTotal, gamesTotal, tiebreaksTotal, bagels, breadsticks,
+    winnerSets, loserSets,
     straightSets: setsTotal > 0 && loserSets === 0,
-    wentDistance,
+    wentDistance, walkover, retired,
+    breaksTotal, acesTotal, dfTotal, upset, rankGap,
   };
 }
 
-// Order rounds from earliest to final for display.
-const ROUND_ORDER: Record<string, number> = {
-  Q1: 0, Q2: 1, Q3: 2,
-  RR: 3, BR: 3,
-  R128: 4, R64: 5, R32: 6, R16: 7,
-  QF: 8, SF: 9, F: 10,
-};
+// Players on each side (1 or 2 per side), for individual player counting.
+export function winnerPlayers(m: TourMatch): string[] {
+  return [m.winner1_name, m.winner2_name].filter(Boolean) as string[];
+}
+export function loserPlayers(m: TourMatch): string[] {
+  return [m.loser1_name, m.loser2_name].filter(Boolean) as string[];
+}
+export function allPlayers(m: TourMatch): string[] {
+  return [...winnerPlayers(m), ...loserPlayers(m)];
+}
+export function sideLabel(m: TourMatch, side: "w" | "l"): string {
+  return side === "w" ? winnerPlayers(m).join(" / ") : loserPlayers(m).join(" / ");
+}
 
+const ROUND_ORDER: Record<string, number> = {
+  Q1: 0, Q2: 1, Q3: 2, RR: 3, BR: 3,
+  R128: 4, R64: 5, R32: 6, R16: 7, QF: 8, SF: 9, F: 10,
+};
 export function roundRank(round: string | null | undefined): number {
   if (!round) return 99;
   return ROUND_ORDER[round] ?? 50;
 }
-
 export function roundLabel(round: string | null | undefined): string {
   switch (round) {
     case "F": return "Final";
@@ -86,6 +109,9 @@ export function roundLabel(round: string | null | undefined): string {
     case "R128": return "Round of 128";
     case "RR": return "Round Robin";
     case "BR": return "Bronze / Playoff";
+    case "Q1": return "Qualifying R1";
+    case "Q2": return "Qualifying R2";
+    case "Q3": return "Qualifying R3";
     default: return round ?? "—";
   }
 }

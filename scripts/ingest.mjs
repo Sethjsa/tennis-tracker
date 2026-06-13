@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// Ingest Jeff Sackmann's open ATP/WTA match data into Supabase `tour_matches`.
+// Ingest Jeff Sackmann's open ATP/WTA match data (singles + doubles) into
+// Supabase `tour_matches`.   npm run ingest
 //
-//   npm run ingest
-//
-// Configure tours/years via INGEST_TOURS / INGEST_YEARS in .env.local.
-// Re-running is safe (idempotent upsert) and refreshes the latest season.
+// Configure via INGEST_TOURS / INGEST_YEARS in .env.local. Re-running is safe.
+// Note on coverage: Sackmann has ATP doubles only 2000-2020 and no WTA doubles;
+// missing files are skipped automatically.
 
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
@@ -14,7 +14,6 @@ import { createClient } from "@supabase/supabase-js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
 
-// --- tiny .env.local loader (no dependency) ---------------------------------
 function loadEnv() {
   const file = resolve(ROOT, ".env.local");
   if (!existsSync(file)) return;
@@ -25,12 +24,8 @@ function loadEnv() {
     if (eq === -1) continue;
     const key = line.slice(0, eq).trim();
     let val = line.slice(eq + 1).trim();
-    if (
-      (val.startsWith('"') && val.endsWith('"')) ||
-      (val.startsWith("'") && val.endsWith("'"))
-    ) {
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))
       val = val.slice(1, -1);
-    }
     if (!(key in process.env)) process.env[key] = val;
   }
 }
@@ -39,160 +34,189 @@ loadEnv();
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 if (!SUPABASE_URL || !SERVICE_KEY) {
-  console.error(
-    "Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in .env.local",
-  );
+  console.error("Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in .env.local");
   process.exit(1);
 }
+const supabase = createClient(SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } });
 
-const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
-  auth: { persistSession: false },
-});
-
-// --- config ------------------------------------------------------------------
 function parseYears(spec) {
   const out = new Set();
   for (const part of (spec || "2021-2026").split(",")) {
     const t = part.trim();
     const m = t.match(/^(\d{4})-(\d{4})$/);
-    if (m) {
-      for (let y = +m[1]; y <= +m[2]; y++) out.add(y);
-    } else if (/^\d{4}$/.test(t)) {
-      out.add(+t);
-    }
+    if (m) for (let y = +m[1]; y <= +m[2]; y++) out.add(y);
+    else if (/^\d{4}$/.test(t)) out.add(+t);
   }
   return [...out].sort();
 }
-const TOURS = (process.env.INGEST_TOURS || "atp,wta")
-  .split(",")
-  .map((s) => s.trim().toLowerCase())
-  .filter(Boolean);
+const TOURS = (process.env.INGEST_TOURS || "atp,wta").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 const YEARS = parseYears(process.env.INGEST_YEARS);
 
-const REPO = {
-  atp: "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_matches_",
-  wta: "https://raw.githubusercontent.com/JeffSackmann/tennis_wta/master/wta_matches_",
+const RAW = {
+  atp: "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/",
+  wta: "https://raw.githubusercontent.com/JeffSackmann/tennis_wta/master/",
 };
 
-// --- minimal CSV parser (handles quoted fields) ------------------------------
 function parseCSV(text) {
-  const rows = [];
-  let row = [];
-  let field = "";
-  let inQuotes = false;
+  const rows = []; let row = [], field = "", q = false;
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
-    if (inQuotes) {
-      if (c === '"') {
-        if (text[i + 1] === '"') { field += '"'; i++; }
-        else inQuotes = false;
-      } else field += c;
-    } else if (c === '"') {
-      inQuotes = true;
-    } else if (c === ",") {
-      row.push(field); field = "";
-    } else if (c === "\n") {
-      row.push(field); rows.push(row); row = []; field = "";
-    } else if (c === "\r") {
-      // ignore
-    } else field += c;
+    if (q) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else q = false; }
+      else field += c;
+    } else if (c === '"') q = true;
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; }
+    else if (c !== "\r") field += c;
   }
   if (field.length || row.length) { row.push(field); rows.push(row); }
   return rows;
 }
 
-const toInt = (v) => {
-  if (v == null || v === "") return null;
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) ? n : null;
-};
-const toDate = (v) => {
-  if (!v || v.length < 8) return null;
-  return `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}`;
-};
+const toInt = (v) => { if (v == null || v === "") return null; const n = parseInt(v, 10); return Number.isFinite(n) ? n : null; };
+const toNum = (v) => { if (v == null || v === "") return null; const n = parseFloat(v); return Number.isFinite(n) ? Math.round(n * 10) / 10 : null; };
+const toDate = (v) => (!v || v.length < 8 ? null : `${v.slice(0, 4)}-${v.slice(4, 6)}-${v.slice(6, 8)}`);
 
-async function ingestFile(tour, year) {
-  const url = `${REPO[tour]}${year}.csv`;
-  process.stdout.write(`  ${tour.toUpperCase()} ${year} … `);
-  const res = await fetch(url);
-  if (!res.ok) {
-    console.log(res.status === 404 ? "no file (skipped)" : `HTTP ${res.status} (skipped)`);
-    return 0;
+// Estimate a per-match date from the tournament start date + round.
+function estDate(iso, round, level) {
+  if (!iso) return null;
+  const slam = level === "G";
+  const off = (slam
+    ? { Q1: -3, Q2: -2, Q3: -1, R128: 0, R64: 1, R32: 3, R16: 5, QF: 7, SF: 9, F: 13, RR: 3, BR: 11 }
+    : { Q1: -2, Q2: -1, Q3: 0, R128: 0, R64: 1, R32: 1, R16: 2, QF: 3, SF: 4, F: 5, RR: 1, BR: 4 }
+  )[round] ?? 0;
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + off);
+  return d.toISOString().slice(0, 10);
+}
+
+// Serve-stat columns are identical across singles/doubles; CSV uses mixed case.
+const SERVE = [
+  ["w_ace", "w_ace"], ["w_df", "w_df"], ["w_svpt", "w_svpt"], ["w_1stIn", "w_1stin"],
+  ["w_1stWon", "w_1stwon"], ["w_2ndWon", "w_2ndwon"], ["w_SvGms", "w_svgms"],
+  ["w_bpSaved", "w_bpsaved"], ["w_bpFaced", "w_bpfaced"],
+  ["l_ace", "l_ace"], ["l_df", "l_df"], ["l_svpt", "l_svpt"], ["l_1stIn", "l_1stin"],
+  ["l_1stWon", "l_1stwon"], ["l_2ndWon", "l_2ndwon"], ["l_SvGms", "l_svgms"],
+  ["l_bpSaved", "l_bpsaved"], ["l_bpFaced", "l_bpfaced"],
+];
+
+function mapRow(get, tour, year, isDoubles) {
+  const level = get("tourney_level");
+  const tdate = toDate(get("tourney_date"));
+  const round = get("round") || null;
+  const base = {
+    tour, year, is_doubles: isDoubles,
+    tourney_id: get("tourney_id") || null,
+    tourney_name: get("tourney_name") || "Unknown",
+    surface: get("surface") || null,
+    draw_size: toInt(get("draw_size")),
+    tourney_level: level || null,
+    tourney_date: tdate,
+    est_date: estDate(tdate, round, level),
+    match_num: toInt(get("match_num")),
+    round,
+    best_of: toInt(get("best_of")),
+    minutes: toInt(get("minutes")),
+    score: get("score") || null,
+    winner_seed: toInt(get("winner_seed")),
+    winner_entry: get("winner_entry") || null,
+    loser_seed: toInt(get("loser_seed")),
+    loser_entry: get("loser_entry") || null,
+  };
+  for (const [csv, col] of SERVE) base[col] = toInt(get(csv));
+
+  if (isDoubles) {
+    Object.assign(base, {
+      winner1_name: get("winner1_name"), winner1_ioc: get("winner1_ioc") || null,
+      winner1_age: toNum(get("winner1_age")), winner1_ht: toInt(get("winner1_ht")),
+      winner1_hand: get("winner1_hand") || null, winner1_rank: toInt(get("winner1_rank")),
+      winner1_rank_points: toInt(get("winner1_rank_points")),
+      winner2_name: get("winner2_name") || null, winner2_ioc: get("winner2_ioc") || null,
+      winner2_age: toNum(get("winner2_age")), winner2_ht: toInt(get("winner2_ht")),
+      winner2_hand: get("winner2_hand") || null, winner2_rank: toInt(get("winner2_rank")),
+      winner2_rank_points: toInt(get("winner2_rank_points")),
+      loser1_name: get("loser1_name"), loser1_ioc: get("loser1_ioc") || null,
+      loser1_age: toNum(get("loser1_age")), loser1_ht: toInt(get("loser1_ht")),
+      loser1_hand: get("loser1_hand") || null, loser1_rank: toInt(get("loser1_rank")),
+      loser1_rank_points: toInt(get("loser1_rank_points")),
+      loser2_name: get("loser2_name") || null, loser2_ioc: get("loser2_ioc") || null,
+      loser2_age: toNum(get("loser2_age")), loser2_ht: toInt(get("loser2_ht")),
+      loser2_hand: get("loser2_hand") || null, loser2_rank: toInt(get("loser2_rank")),
+      loser2_rank_points: toInt(get("loser2_rank_points")),
+    });
+  } else {
+    Object.assign(base, {
+      winner1_name: get("winner_name"), winner1_ioc: get("winner_ioc") || null,
+      winner1_age: toNum(get("winner_age")), winner1_ht: toInt(get("winner_ht")),
+      winner1_hand: get("winner_hand") || null, winner1_rank: toInt(get("winner_rank")),
+      winner1_rank_points: toInt(get("winner_rank_points")),
+      winner2_name: null, winner2_ioc: null, winner2_age: null, winner2_ht: null,
+      winner2_hand: null, winner2_rank: null, winner2_rank_points: null,
+      loser1_name: get("loser_name"), loser1_ioc: get("loser_ioc") || null,
+      loser1_age: toNum(get("loser_age")), loser1_ht: toInt(get("loser_ht")),
+      loser1_hand: get("loser_hand") || null, loser1_rank: toInt(get("loser_rank")),
+      loser1_rank_points: toInt(get("loser_rank_points")),
+      loser2_name: null, loser2_ioc: null, loser2_age: null, loser2_ht: null,
+      loser2_hand: null, loser2_rank: null, loser2_rank_points: null,
+    });
   }
+  return base;
+}
+
+async function ingestFile(tour, year, isDoubles) {
+  const fname = isDoubles
+    ? `${tour}_matches_doubles_${year}.csv`
+    : `${tour}_matches_${year}.csv`;
+  const label = `  ${tour.toUpperCase()} ${isDoubles ? "doubles" : "singles"} ${year} … `;
+  process.stdout.write(label);
+  let res;
+  try { res = await fetch(RAW[tour] + fname); } catch (e) { console.log(`fetch error (skipped)`); return 0; }
+  if (!res.ok) { console.log(res.status === 404 ? "no file (skipped)" : `HTTP ${res.status}`); return 0; }
+
   const rows = parseCSV(await res.text());
   if (rows.length < 2) { console.log("empty"); return 0; }
   const header = rows[0];
-  const col = (name) => header.indexOf(name);
-  const idx = {
-    tourney_name: col("tourney_name"),
-    surface: col("surface"),
-    tourney_date: col("tourney_date"),
-    match_num: col("match_num"),
-    winner_name: col("winner_name"),
-    loser_name: col("loser_name"),
-    winner_ioc: col("winner_ioc"),
-    loser_ioc: col("loser_ioc"),
-    score: col("score"),
-    best_of: col("best_of"),
-    round: col("round"),
-    minutes: col("minutes"),
-    winner_rank: col("winner_rank"),
-    loser_rank: col("loser_rank"),
-  };
+  const idx = Object.fromEntries(header.map((h, i) => [h, i]));
 
   const records = [];
   for (let r = 1; r < rows.length; r++) {
     const row = rows[r];
-    if (!row[idx.winner_name] || !row[idx.loser_name]) continue;
-    records.push({
-      tour,
-      year,
-      tourney_name: row[idx.tourney_name] || "Unknown",
-      surface: row[idx.surface] || null,
-      tourney_date: toDate(row[idx.tourney_date]),
-      match_num: toInt(row[idx.match_num]),
-      winner_name: row[idx.winner_name],
-      loser_name: row[idx.loser_name],
-      winner_ioc: row[idx.winner_ioc] || null,
-      loser_ioc: row[idx.loser_ioc] || null,
-      score: row[idx.score] || null,
-      best_of: toInt(row[idx.best_of]),
-      round: row[idx.round] || null,
-      minutes: toInt(row[idx.minutes]),
-      winner_rank: toInt(row[idx.winner_rank]),
-      loser_rank: toInt(row[idx.loser_rank]),
-    });
+    if (!row.length) continue;
+    const get = (name) => (idx[name] != null ? row[idx[name]] : undefined);
+    const w1 = isDoubles ? get("winner1_name") : get("winner_name");
+    const l1 = isDoubles ? get("loser1_name") : get("loser_name");
+    if (!w1 || !l1) continue;
+    records.push(mapRow(get, tour, year, isDoubles));
   }
 
-  // Two distinct events can share a name within a year, so the
-  // (tour, year, tourney_name, match_num) key can collide. De-duplicate per file
-  // (last wins) so a single upsert batch never targets the same key twice.
+  // De-dupe within file on the conflict key so no upsert batch hits a key twice.
   const byKey = new Map();
-  for (const rec of records) byKey.set(`${rec.tourney_name}|${rec.match_num}`, rec);
+  for (const rec of records) byKey.set(`${rec.tourney_id}|${rec.match_num}`, rec);
   const deduped = [...byKey.values()];
-  const dropped = records.length - deduped.length;
 
-  // Upsert in chunks on the (tour, year, tourney_name, match_num) unique key.
   let written = 0;
   const CHUNK = 500;
   for (let i = 0; i < deduped.length; i += CHUNK) {
     const chunk = deduped.slice(i, i + CHUNK);
     const { error } = await supabase
       .from("tour_matches")
-      .upsert(chunk, { onConflict: "tour,year,tourney_name,match_num" });
+      .upsert(chunk, { onConflict: "tour,year,is_doubles,tourney_id,match_num" });
     if (error) { console.log(`\n    ! ${error.message}`); break; }
     written += chunk.length;
   }
-  console.log(`${written} matches${dropped ? ` (${dropped} dup key${dropped === 1 ? "" : "s"} merged)` : ""}`);
+  console.log(`${written} matches`);
   return written;
 }
 
 (async () => {
-  console.log(`Ingesting tours=[${TOURS}] years=[${YEARS[0]}..${YEARS.at(-1)}]`);
+  console.log(`Ingesting tours=[${TOURS}] years=[${YEARS[0]}..${YEARS.at(-1)}] (singles + doubles)`);
   let total = 0;
   for (const tour of TOURS) {
-    if (!REPO[tour]) { console.log(`  unknown tour "${tour}" (skipped)`); continue; }
-    for (const year of YEARS) total += await ingestFile(tour, year);
+    if (!RAW[tour]) { console.log(`  unknown tour "${tour}" (skipped)`); continue; }
+    for (const year of YEARS) {
+      total += await ingestFile(tour, year, false);
+      total += await ingestFile(tour, year, true);
+    }
   }
   console.log(`Done. ${total} matches upserted.`);
   process.exit(0);
