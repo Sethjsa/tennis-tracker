@@ -112,6 +112,26 @@ const tdNameKeys = (name) => {
   if (t.length < 2) return [];
   return nameKeyVariants(normAlpha(t[t.length - 1])[0] || "", t.slice(0, -1));
 };
+// Set-score signature, e.g. "6-4,5-7,7-6", used to disambiguate which meeting
+// between a pair this is (two matches between the same players almost never share
+// a score). From a Sackmann score string, or from tennis-data W1/L1.. columns.
+function sackScoreSig(score) {
+  const sets = [];
+  for (const tok of (score || "").trim().split(/\s+/)) {
+    const m = tok.match(/^(\d{1,2})-(\d{1,2})/);
+    if (m) sets.push(`${+m[1]}-${+m[2]}`);
+  }
+  return sets.join(",");
+}
+function tdScoreSig(r) {
+  const sets = [];
+  for (let i = 1; i <= 5; i++) {
+    const w = r["W" + i], l = r["L" + i];
+    if (w != null && l != null && w !== "" && l !== "") sets.push(`${parseInt(w, 10)}-${parseInt(l, 10)}`);
+  }
+  return sets.join(",");
+}
+
 const TD = {
   atp: (y) => [`http://www.tennis-data.co.uk/${y}/${y}.xlsx`, `http://www.tennis-data.co.uk/${y}/${y}.xls`],
   wta: (y) => [`http://www.tennis-data.co.uk/${y}w/${y}.xlsx`, `http://www.tennis-data.co.uk/${y}w/${y}.xls`],
@@ -134,20 +154,48 @@ async function fetchDateMap(tour, year) {
   for (const r of rows) {
     if (!r.Date || !r.Winner || !r.Loser) continue;
     const d = new Date(new Date(r.Date).getTime() + 12 * 3600 * 1000).toISOString().slice(0, 10);
-    const info = { date: d, series: r.Series || r.Tier || null, court: r.Court || null };
+    const info = { date: d, series: r.Series || r.Tier || null, court: r.Court || null, sig: tdScoreSig(r) };
+    // A pair can meet at several events in a year, so keep ALL candidates per key.
     for (const wk of tdNameKeys(r.Winner))
-      for (const lk of tdNameKeys(r.Loser))
-        if (!map.has(wk + "#" + lk)) map.set(wk + "#" + lk, info);
+      for (const lk of tdNameKeys(r.Loser)) {
+        const k = wk + "#" + lk;
+        if (!map.has(k)) map.set(k, []);
+        map.get(k).push(info);
+      }
   }
   return map;
 }
-function lookupTd(map, winnerName, loserName) {
+// Match a Sackmann row to a tennis-data row by player names AND set scores, so the
+// same pair's meetings at different events (e.g. Olympics vs Canada Masters a week
+// later) aren't confused. Falls back to a tight date window only when the score is
+// unusable (walkover/empty).
+function lookupTd(map, winnerName, loserName, tourneyDateISO, score) {
+  const sig = sackScoreSig(score);
+  const base = tourneyDateISO ? Date.parse(tourneyDateISO) : null;
+  const inWindow = (info) => base == null || (() => { const diff = (Date.parse(info.date) - base) / 86400000; return diff >= -4 && diff <= 24; })();
+
+  const candidates = [];
   for (const wk of sackNameKeys(winnerName))
     for (const lk of sackNameKeys(loserName)) {
-      const info = map.get(wk + "#" + lk);
-      if (info) return info;
+      const arr = map.get(wk + "#" + lk);
+      if (arr) candidates.push(...arr);
     }
-  return null;
+  if (!candidates.length) return null;
+
+  // Prefer an exact score match (definitive).
+  if (sig) {
+    const exact = candidates.filter((c) => c.sig === sig);
+    if (exact.length === 1) return exact[0];
+    if (exact.length > 1) {
+      let best = exact[0], bestDiff = Infinity;
+      for (const c of exact) { const diff = base == null ? 0 : Math.abs((Date.parse(c.date) - base) / 86400000); if (diff < bestDiff) { bestDiff = diff; best = c; } }
+      return best;
+    }
+    return null; // had a real score but no scoreline matched -> don't guess
+  }
+  // No usable score (walkover): accept a single in-window candidate only.
+  const windowed = candidates.filter(inWindow);
+  return windowed.length === 1 ? windowed[0] : null;
 }
 
 // Serve-stat columns are identical across singles/doubles; CSV uses mixed case.
@@ -166,7 +214,7 @@ function mapRow(get, tour, year, isDoubles, dateMap) {
   const round = get("round") || null;
   const wName = isDoubles ? get("winner1_name") : get("winner_name");
   const lName = isDoubles ? get("loser1_name") : get("loser_name");
-  const td = isDoubles || !dateMap ? null : lookupTd(dateMap, wName, lName);
+  const td = isDoubles || !dateMap ? null : lookupTd(dateMap, wName, lName, tdate, get("score"));
   const base = {
     tour, year, is_doubles: isDoubles,
     tourney_id: get("tourney_id") || null,
