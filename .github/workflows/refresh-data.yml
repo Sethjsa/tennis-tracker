@@ -1,0 +1,50 @@
+name: Refresh tennis data
+
+# Re-ingests Jeff Sackmann's open data (+ tennis-data.co.uk dates) into Supabase.
+# Runs weekly for recent seasons (which is what actually changes), and on demand.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      years:
+        description: 'Years to ingest (e.g. "2026" or "2010-2026" for a full rebuild)'
+        required: false
+        default: ""
+
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Pick years
+        id: years
+        run: |
+          if [ -n "${{ github.event.inputs.years }}" ]; then
+            echo "value=${{ github.event.inputs.years }}" >> "$GITHUB_OUTPUT"
+          else
+            # Scheduled run: only the seasons that still change (current + previous).
+            Y=$(date +%Y)
+            echo "value=$((Y-1))-$Y" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ingest
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          INGEST_TOURS: atp,wta
+          INGEST_YEARS: ${{ steps.years.outputs.value }}
+        run: npm run ingest
