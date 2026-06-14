@@ -75,6 +75,19 @@ Open <http://localhost:3000>, create an account, and start logging.
 
 ---
 
+## Automatic data refresh
+
+The source datasets are updated as tournaments finish, so a scheduled
+[GitHub Action](.github/workflows/refresh-data.yml) re-runs the ingest:
+
+- **Weekly** (Mondays 06:00 UTC) it refreshes the **current + previous season** (the
+  only years that change), upserting into the same Supabase database.
+- **On demand**: Actions tab → *Refresh tennis data* → *Run workflow*. Pass a `years`
+  value like `2010-2026` to force a full rebuild.
+
+It needs two repo secrets (Settings → Secrets and variables → Actions):
+`NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
+
 ## Project layout
 
 ```
